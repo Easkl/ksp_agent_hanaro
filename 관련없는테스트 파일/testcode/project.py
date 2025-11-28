@@ -17,6 +17,11 @@ Instructions to Run:
 from kspdg.agent_api.base_agent import KSPDGBaseAgent
 from kspdg.pe1.e1_envs import PE1_E1_I3_Env
 from kspdg.agent_api.runner import AgentEnvRunner
+import time
+
+# env = PE1_E1_I3_Env()  # 제거: runner가 자동으로 처리
+# obs = env.reset()     # 제거: KSP 미션이 로드되지 않아서 실패
+
 
 class NaivePursuitAgent(KSPDGBaseAgent):
     """An agent that naively burns directly toward it's target"""
@@ -35,6 +40,7 @@ class NaivePursuitAgent(KSPDGBaseAgent):
             "ref_frame": 0  # burn_vec expressed in agent vessel's right-handed body frame. 
                             # i.e. forward throttle, right throttle, down throttle, 
                             # Can also use rhcbci (1) and rhntw (2) ref frames
+
         }
 
 if __name__ == "__main__":
