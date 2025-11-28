@@ -51,6 +51,8 @@ def navigation(observation):
     rel_vy = target_vy - agent_vy
     rel_vz = target_vz - agent_vz
 
+    rel_a = np.zeros(3, dtype=float)
+
     #상태벡터 정의
     x = np.array([error_x, error_y, error_z, rel_vx, rel_vy, rel_vz])
 
@@ -60,7 +62,7 @@ def navigation(observation):
         return u
     dt = observation_history[-1][0] - observation_history[-2][0]
     if abs(dt) < 1e-6:
-        return -K_GAIN @ x  # 시간 차이가 사실상 0이면 가속도 보상 없이 피드백만 적용
+        return -K_GAIN @ x  # 시간 차이가 너무 작으면 오버슈팅, 가속도 보상 없이 피드백만 적용
 
     # 상대 가속도 계산
     rel_ax = ((observation_history[-1][12] - observation_history[-1][6]) - (observation_history[-2][12] - observation_history[-2][6])) / dt
