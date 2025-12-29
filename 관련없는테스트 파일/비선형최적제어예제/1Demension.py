@@ -1,91 +1,110 @@
-from gekko import GEKKO
 import numpy as np
+import scipy.linalg
 import matplotlib.pyplot as plt
 
-# GEKKO 모델 생성
-m = GEKKO()
+# ====== 초기 조건 ======
+tracker_x = 0.0
+tracker_v = 0.0
 
-# 시간 설정 (0~10초, 101 포인트)
-m.time = np.linspace(0, 10, 101)
+target_x = 20.0
+target_v = 0.0
 
-# 변수 10개 (상태 변수들)
-x1 = m.Var(value=1)  # 위치 1
-x2 = m.Var(value=0)  # 속도 1
-x3 = m.Var(value=1)  # 위치 2
-x4 = m.Var(value=0)  # 속도 2
-x5 = m.Var(value=1)  # 위치 3
-x6 = m.Var(value=0)  # 속도 3
-x7 = m.Var(value=10) # 연료
-x8 = m.Var(value=0, lb=-5, ub=5) # 입력 1
-x9 = m.Var(value=0, lb=-5, ub=5) # 입력 2
-x10 = m.Var(value=0, lb=-5, ub=5) # 입력 3
+# 시뮬레이션 설정
+T = 20.0
+dt = 0.01
+N = int(T / dt)
+t = np.linspace(0, T, N)
 
-# 비선형 ODE (dynamics)
-m.Equation(x1.dt() == x2)  # dx1/dt = x2
-m.Equation(x2.dt() == x8 / 1.0 + 0.1 * x1**2)  # dx2/dt = u1 + 비선형 항
-m.Equation(x3.dt() == x4)
-m.Equation(x4.dt() == x9 / 1.0 + 0.1 * x3**2)
-m.Equation(x5.dt() == x6)
-m.Equation(x6.dt() == x10 / 1.0 + 0.1 * x5**2)
+# ====== 상태벡터 정의 ======
+# error = tracker - target
+# rel_v = v_tracker - v_target
+error = tracker_x - target_x
+rel_v = tracker_v - target_v
+x = np.array([error, rel_v])  # [e, e_dot]
 
-# 연료 소모 (ODE)
-m.Equation(x7.dt() == -m.abs(x8) - m.abs(x9) - m.abs(x10))  # df/dt = -|u1| - |u2| - |u3|
+# ====== LQR 설계 (연속시간) ======
+# 상태: [e, e_dot]
+A = np.array([[0., 1.],
+              [0., 0.]])
+B = np.array([[0.],
+              [1.]])  # 입력 u = tracker 가속도
 
-# 대수 방정식 (제약/관계)
-m.Equation(x8 == m.max2(-5, m.min2(5, x2 * 2)))  # u1 = saturate(2*x2)
-m.Equation(x9 == m.max2(-5, m.min2(5, x4 * 2)))
-m.Equation(x10 == m.max2(-5, m.min2(5, x6 * 2)))
+Q = np.array([[10., 0.],
+              [0.,  1.]])   # 위치 에러를 더 강하게 벌점
+R = np.array([[1.]])         # 입력 크기 벌점
 
-# 초기 조건
-m.fix_initial(x1, 1)
-m.fix_initial(x2, 0)
-m.fix_initial(x3, 1)
-m.fix_initial(x4, 0)
-m.fix_initial(x5, 1)
-m.fix_initial(x6, 0)
-m.fix_initial(x7, 10)
+P = scipy.linalg.solve_continuous_are(A, B, Q, R)
+K = np.linalg.inv(R) @ B.T @ P   # 1x2
 
-# 목적 함수 (연료 최소화 + 최종 위치 목표)
-m.Minimize(m.integral(x7) + (x1 - 5)**2 + (x3 - 5)**2 + (x5 - 5)**2)
+print("LQR gain K:", K)
 
-# 시뮬레이션 모드
-m.options.IMODE = 6  # 최적화
-m.options.NODES = 3   # 속도 향상
-m.solve()
+# ====== 기록용 배열 ======
+tracker_x_hist = np.zeros(N)
+target_x_hist = np.zeros(N)
+error_hist = np.zeros(N)
+u_hist = np.zeros(N)
 
-# 결과 출력
-print("Final x1:", x1.value[-1])
-print("Final x3:", x3.value[-1])
-print("Final x5:", x5.value[-1])
-print("Final fuel:", x7.value[-1])
+tracker_x_hist[0] = tracker_x
+target_x_hist[0] = target_x
+error_hist[0] = error
 
-# 플롯
-plt.figure(figsize=(12, 8))
-plt.subplot(2, 2, 1)
-plt.plot(m.time, x1.value, label='x1')
-plt.plot(m.time, x3.value, label='x3')
-plt.plot(m.time, x5.value, label='x5')
+# ====== 시뮬레이션 루프 ======
+for i in range(N-1):
+    # 1) 타겟 가속도 (외란) - 너무 크지 않게 적당히
+    a_target = np.random.uniform(-1.0, 1.0)
+
+    # 2) 타겟 dynamics 업데이트
+    target_v += a_target * dt
+    target_x += target_v * dt
+
+    # 3) 상대 상태 업데이트 (tracker - target 기준)
+    error = tracker_x - target_x
+    rel_v = tracker_v - target_v
+    x = np.array([error, rel_v])
+
+    # 4) 제어 입력: u = -Kx + a_target
+    #    (여기서 a_target은 "외란 보상"용 feedforward)
+    u = float(-K @ x + a_target)
+    
+    # 5) 추적자 dynamics 업데이트
+    tracker_v += u * dt
+    tracker_x += tracker_v * dt
+
+    # 6) 기록
+    tracker_x_hist[i+1] = tracker_x
+    target_x_hist[i+1] = target_x
+    error_hist[i+1] = error
+    u_hist[i+1] = u
+
+# ====== 결과 플롯 ======
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, target_x_hist, label="Target position", linewidth=2)
+plt.plot(t, tracker_x_hist, label="Tracker position", linewidth=2, linestyle="--")
+plt.xlabel("Time [s]")
+plt.ylabel("Position (1D)")
+plt.title("1D LQR Tracker vs Target")
+plt.grid(True)
 plt.legend()
-plt.title('Positions')
+plt.tight_layout()
+plt.show()
 
-plt.subplot(2, 2, 2)
-plt.plot(m.time, x2.value, label='v1')
-plt.plot(m.time, x4.value, label='v2')
-plt.plot(m.time, x6.value, label='v3')
+plt.figure(figsize=(10, 4))
+plt.plot(t, error_hist, label="error = tracker - target")
+plt.xlabel("Time [s]")
+plt.ylabel("Error")
+plt.title("Position Error Over Time")
+plt.grid(True)
 plt.legend()
-plt.title('Velocities')
+plt.tight_layout()
+plt.show()
 
-plt.subplot(2, 2, 3)
-plt.plot(m.time, x7.value, label='Fuel')
+plt.figure(figsize=(10, 4))
+plt.plot(t, u_hist, label="Control input u")
+plt.xlabel("Time [s]")
+plt.ylabel("u (tracker acceleration)")
+plt.title("Control Input Over Time")
+plt.grid(True)
 plt.legend()
-plt.title('Fuel')
-
-plt.subplot(2, 2, 4)
-plt.plot(m.time, x8.value, label='u1')
-plt.plot(m.time, x9.value, label='u2')
-plt.plot(m.time, x10.value, label='u3')
-plt.legend()
-plt.title('Inputs')
-
 plt.tight_layout()
 plt.show()
