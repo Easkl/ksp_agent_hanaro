@@ -1,5 +1,6 @@
+from kspdg.agent_api.base_agent import KSPDGBaseAgent
 from kspdg.pe1.e1_envs import PE1_E1_I1_Env
-import krpc
+from kspdg.agent_api.runner import AgentEnvRunner
 
 agent = PE1_E1_I1_Env()
 agent.reset()
