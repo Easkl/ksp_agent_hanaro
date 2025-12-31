@@ -6,7 +6,7 @@ from kspdg.agent_api.runner import AgentEnvRunner
 class PE1_E1_I1_Env_SAS(PE1_E1_I1_Env):
     def _reset_vessels(self):
         super()._reset_vessels()
-        self.vesPursue.control.sas_mode = self.conn.space_center.SASMode.stability_assist
+        self.vesPursue.control.sas_mode = self.conn.space_center.SASMode.stability_assist #디폴트로 SAS가 target 모드로 설정돼 있길래 stability_assist로 바꿈
 
 class PE_E1_I1_Agent(KSPDGBaseAgent):
     def __init__(self):
@@ -29,4 +29,3 @@ if __name__ == "__main__":
         debug=True,
         enable_telemetry=True)
     print(runner.run())
-    
