@@ -22,7 +22,17 @@ observation_count = 0
 RCS_THRUST_PER_THRUSTER_N = 1000.0
 RCS_THRUSTER_COUNT_PER_AXIS = np.array([8.0, 4.0, 4.0], dtype=float)
 
+# Suppress cross-track (body Y/Z) thruster chatter when lateral errors are tiny.
+CROSS_TRACK_POS_DEADBAND_M = 5.0
+CROSS_TRACK_VEL_DEADBAND_MPS = 0.10
+CROSS_TRACK_THRUST_SCALE = 0.25
+
 _BRAKE_AXIS_STATE = np.array([False, False, False], dtype=bool)
+
+# Brake hysteresis (more conservative => brake earlier, release later)
+BRAKE_ON_FACTOR = 0.7
+BRAKE_OFF_FACTOR = 0.35
+BRAKE_V_RELEASE = 0.05
 
 _AGENT_KRPC_CONN = None
 _AGENT_KRPC_SC = None
@@ -182,40 +192,75 @@ def optimal_control(observation):
     u_accel = u_raw
     u_accel_agent = _accel_rhcbci_to_rhvbody(u_accel)
 
-    thrust = vehicle_mass * u_accel
+    thrust_rhcbci = vehicle_mass * u_accel
+    thrust_rhvbody = vehicle_mass * u_accel_agent if u_accel_agent is not None else None
 
     ENABLE_BRAKE_OVERRIDE = True
     if ENABLE_BRAKE_OVERRIDE:
         max_thrust_n = RCS_THRUSTER_COUNT_PER_AXIS * RCS_THRUST_PER_THRUSTER_N
         a_max = max_thrust_n / max(vehicle_mass, 1e-9)
 
-        pos_err = x[0:3]
-        vel_err = x[3:6]
-        brake_on_factor = 1.0
-        brake_off_factor = 0.6
-        v_release = 0.15
+        # Prefer braking in body axes (matches how RCS actually applies thrust).
+        pos_err_body = _accel_rhcbci_to_rhvbody(x[0:3])
+        vel_err_body = _accel_rhcbci_to_rhvbody(x[3:6])
+
+        use_body = (
+            pos_err_body is not None
+            and vel_err_body is not None
+            and thrust_rhvbody is not None
+        )
+
+        if use_body:
+            pos_err = pos_err_body
+            vel_err = vel_err_body
+            thrust = thrust_rhvbody
+        else:
+            pos_err = x[0:3]
+            vel_err = x[3:6]
+            thrust = thrust_rhcbci
 
         for i in range(3):
             stop_limit = 2.0 * a_max[i] * abs(pos_err[i]) + 1e-12
             v2 = vel_err[i] ** 2
 
             if not _BRAKE_AXIS_STATE[i]:
-                if v2 > brake_on_factor * stop_limit:
+                if v2 > BRAKE_ON_FACTOR * stop_limit:
                     _BRAKE_AXIS_STATE[i] = True
             else:
-                if (abs(vel_err[i]) < v_release) or (v2 < brake_off_factor * stop_limit):
+                if (abs(vel_err[i]) < BRAKE_V_RELEASE) or (v2 < BRAKE_OFF_FACTOR * stop_limit):
                     _BRAKE_AXIS_STATE[i] = False
 
             if _BRAKE_AXIS_STATE[i]:
                 s = 1.0 if vel_err[i] >= 0.0 else -1.0
                 thrust[i] = -s * max_thrust_n[i]
 
+        # Cross-track suppression (only meaningful in body axes: [forward, right, down]).
+        if use_body:
+            for i in (1, 2):
+                if (abs(pos_err[i]) < CROSS_TRACK_POS_DEADBAND_M) and (abs(vel_err[i]) < CROSS_TRACK_VEL_DEADBAND_MPS):
+                    thrust[i] = 0.0
+                else:
+                    thrust[i] *= CROSS_TRACK_THRUST_SCALE
+
+        # push back into selected frame variable
+        if thrust_rhvbody is not None and thrust is thrust_rhvbody:
+            thrust_rhvbody = thrust
+        else:
+            thrust_rhcbci = thrust
+
     burn_dur = 0.2
-    action = {
-        "burn_vec": [float(thrust[0]), float(thrust[1]), float(thrust[2]), float(burn_dur)],
-        "ref_frame": 1,
-        "vec_type": 1,  # thrust [N]
-    }
+    if thrust_rhvbody is not None:
+        action = {
+            "burn_vec": [float(thrust_rhvbody[0]), float(thrust_rhvbody[1]), float(thrust_rhvbody[2]), float(burn_dur)],
+            "ref_frame": 0,
+            "vec_type": 1,  # thrust [N]
+        }
+    else:
+        action = {
+            "burn_vec": [float(thrust_rhcbci[0]), float(thrust_rhcbci[1]), float(thrust_rhcbci[2]), float(burn_dur)],
+            "ref_frame": 1,
+            "vec_type": 1,  # thrust [N]
+        }
 
     print("x=", x)
     print("u_needed_accel=", u_accel)
@@ -246,7 +291,7 @@ if __name__ == "__main__":
         agent=pe_e1_i1_agent, 
         env_cls=PE1_E1_I1_Env_SAS, 
         env_kwargs=None,
-        runner_timeout=100,
+        runner_timeout=None,
         debug=False,
         enable_telemetry=False)
     print(runner.run())
