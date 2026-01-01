@@ -154,8 +154,8 @@ class KSPDGBaseEnv(ABC, gym.Env):
         """
         return {"is_episode_done": done}
 
-    def convert_rhcbci_to_rhvbody(self, v__rhcbci: List[float], vessel) -> List[float]:
-        '''Converts vector in right-handed celestial-body-centered-inertial frame to 
+    def convert_rhcbci_to_rhvbody(i: List[float], vessel) -> List[float]:
+        '''Converts vector in right-handed celesself, v__rhcbctial-body-centered-inertial frame to 
         right-oriented body frame of specified vessel
 
         Args:

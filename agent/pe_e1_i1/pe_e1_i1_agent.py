@@ -4,7 +4,6 @@ from kspdg.agent_api.runner import AgentEnvRunner
 import numpy as np
 
 try:
-    # Optional: only needed if you want true LQR (solve CARE)
     from scipy.linalg import solve_continuous_are
 except Exception:
     solve_continuous_are = None
@@ -16,21 +15,21 @@ try:
 except Exception:
     krpc = None
 
-#관측로그
 observation_history = []
 observation_count = 0
+
+# RCS max thrust per axis [N] = count * per-thruster thrust
+RCS_THRUST_PER_THRUSTER_N = 1000.0
+RCS_THRUSTER_COUNT_PER_AXIS = np.array([8.0, 4.0, 4.0], dtype=float)
+
+_BRAKE_AXIS_STATE = np.array([False, False, False], dtype=bool)
 
 _AGENT_KRPC_CONN = None
 _AGENT_KRPC_SC = None
 
 
 def _get_agent_spacecenter():
-    """Best-effort kRPC connection from agent process.
-
-    The environment runs in a different process and has its own kRPC connection.
-    If we want to convert vectors into vessel body-frame inside the agent process,
-    we need our own kRPC connection.
-    """
+    """Best-effort agent-side kRPC connection (for frame conversion debug)."""
 
     global _AGENT_KRPC_CONN, _AGENT_KRPC_SC
 
@@ -45,11 +44,7 @@ def _get_agent_spacecenter():
 
 
 def _accel_rhcbci_to_rhvbody(accel__rhcbci: np.ndarray) -> np.ndarray | None:
-    """Convert a 3-vector from rhcbci to rhvbody (forward, right, down).
-
-    Uses the same transformation steps as KSPDG env:
-    rhcbci (RH) -> lhcbci -> lhvbody -> rhvbody
-    """
+    """Convert a 3-vector from rhcbci to rhvbody (forward, right, down)."""
 
     sc = _get_agent_spacecenter()
     if sc is None:
@@ -109,11 +104,12 @@ def _compute_lqr_gain():
 
 K_GAIN = _compute_lqr_gain()
 
-# 최적제어 함수 정의
 def optimal_control(observation):
+    global _BRAKE_AXIS_STATE
+
     time = float(observation[0])
     vehicle_mass = float(observation[1])
-    vehicle_propellant = float(observation[2])  # 지금은 안 쓰지만 그냥 남겨둬 봤음
+    vehicle_propellant = float(observation[2])
 
     agent_x = float(observation[3])
     agent_y = float(observation[4])
@@ -129,7 +125,6 @@ def optimal_control(observation):
     target_vy = float(observation[13])
     target_vz = float(observation[14])
 
-    # 2) 상태벡터 x 정의 (agent - target 부호)
     error_x = agent_x - target_x
     error_y = agent_y - target_y
     error_z = agent_z - target_z
@@ -139,7 +134,11 @@ def optimal_control(observation):
 
     x = np.array([error_x, error_y, error_z, error_vx, error_vy, error_vz], dtype=float)
 
-    # 3) xdot (최근 2개 observation 평균 변화율). dt가 너무 작으면 제외(None)
+    if len(observation_history) >= 2:
+        prev_time = float(observation_history[-2][0])
+        if time + 1e-9 < prev_time:
+            _BRAKE_AXIS_STATE[:] = False
+
     xdot = None
     if len(observation_history) >= 2:
         prev_obs = observation_history[-2]
@@ -171,10 +170,7 @@ def optimal_control(observation):
             )
             xdot = (x - prev_x) / dt
 
-    # 4) 제어입력 u 계산
-    # K_GAIN이 None이면 여기서 크래시하므로, 최소한의 fallback 제공
     if K_GAIN is None:
-        # 아주 약한 감쇠(속도만 줄이는) fallback
         kd = 0.05
         u_raw = np.array(
             [-kd * error_vx, -kd * error_vy, -kd * error_vz],
@@ -183,22 +179,44 @@ def optimal_control(observation):
     else:
         u_raw = -(K_GAIN @ x)
 
-    # 포화/클립 없이 "순수" 필요 가속도만 사용
     u_accel = u_raw
-    # (옵션) 디버그/해석용: rhcbci 기준 가속도를 agent body 기준으로 변환
     u_accel_agent = _accel_rhcbci_to_rhvbody(u_accel)
 
-    # accel [m/s^2] -> thrust [N]
     thrust = vehicle_mass * u_accel
+
+    ENABLE_BRAKE_OVERRIDE = True
+    if ENABLE_BRAKE_OVERRIDE:
+        max_thrust_n = RCS_THRUSTER_COUNT_PER_AXIS * RCS_THRUST_PER_THRUSTER_N
+        a_max = max_thrust_n / max(vehicle_mass, 1e-9)
+
+        pos_err = x[0:3]
+        vel_err = x[3:6]
+        brake_on_factor = 1.0
+        brake_off_factor = 0.6
+        v_release = 0.15
+
+        for i in range(3):
+            stop_limit = 2.0 * a_max[i] * abs(pos_err[i]) + 1e-12
+            v2 = vel_err[i] ** 2
+
+            if not _BRAKE_AXIS_STATE[i]:
+                if v2 > brake_on_factor * stop_limit:
+                    _BRAKE_AXIS_STATE[i] = True
+            else:
+                if (abs(vel_err[i]) < v_release) or (v2 < brake_off_factor * stop_limit):
+                    _BRAKE_AXIS_STATE[i] = False
+
+            if _BRAKE_AXIS_STATE[i]:
+                s = 1.0 if vel_err[i] >= 0.0 else -1.0
+                thrust[i] = -s * max_thrust_n[i]
 
     burn_dur = 0.2
     action = {
         "burn_vec": [float(thrust[0]), float(thrust[1]), float(thrust[2]), float(burn_dur)],
         "ref_frame": 1,
-        "vec_type": 1,
+        "vec_type": 1,  # thrust [N]
     }
 
-    # 디버그 출력(검증용): 최적제어 식 검증에 필요한 최소 정보만
     print("x=", x)
     print("u_needed_accel=", u_accel)
     if u_accel_agent is not None:
@@ -209,13 +227,13 @@ def optimal_control(observation):
 class PE1_E1_I1_Env_SAS(PE1_E1_I1_Env):
     def _reset_vessels(self):
         super()._reset_vessels()
-        self.vesPursue.control.sas_mode = self.conn.space_center.SASMode.stability_assist #디폴트로 SAS가 target 모드로 설정돼 있길래 stability_assist로 바꿈
+        # self.vesPursue.control.sas_mode = self.conn.space_center.SASMode.stability_assist
 
 class PE_E1_I1_Agent(KSPDGBaseAgent):                                    
     def __init__(self):
         super().__init__()
 
-    def get_action(self, observation): # Agent는 get_action만 무한반복하므로 추진 관련 코드는 get_action 안에 쓰기를 바란다
+    def get_action(self, observation):
         global observation_count
         observation_history.append(observation)
         observation_count += 1
