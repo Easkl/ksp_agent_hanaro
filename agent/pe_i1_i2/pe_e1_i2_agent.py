@@ -30,9 +30,12 @@ CROSS_TRACK_THRUST_SCALE = 0.25
 _BRAKE_AXIS_STATE = np.array([False, False, False], dtype=bool)
 
 # Brake hysteresis (more conservative => brake earlier, release later)
-BRAKE_ON_FACTOR = 0.7
-BRAKE_OFF_FACTOR = 0.35
-BRAKE_V_RELEASE = 0.05
+# Tuned to reduce overshoot/"ping-pong" around the target.
+# - Lower ON factor => brake earlier (more margin)
+# - Lower OFF factor and V_RELEASE => hold braking longer
+BRAKE_ON_FACTOR = 0.4
+BRAKE_OFF_FACTOR = 0.15
+BRAKE_V_RELEASE = 0.02
 
 _AGENT_KRPC_CONN = None
 _AGENT_KRPC_SC = None
@@ -113,6 +116,11 @@ def _compute_lqr_gain():
 
 
 K_GAIN = _compute_lqr_gain()
+
+# Select which PE1 environment to run.
+# NOTE: This agent logic can be run in different PE1 E1 initial conditions.
+# Set this to PE1_E1_I2_Env to run the same controller in the I2 scenario.
+ENV_CLS = PE1_E1_I2_Env
 
 def optimal_control(observation):
     global _BRAKE_AXIS_STATE
@@ -269,14 +277,10 @@ def optimal_control(observation):
     
     return action, x, xdot
 
-class PE1_E1_I1_Env_SAS(PE1_E1_I2_Env):
+class PE1_Env_SAS(ENV_CLS):
     def _reset_vessels(self):
         super()._reset_vessels()
         # self.vesPursue.control.sas_mode = self.conn.space_center.SASMode.stability_assist
-
-class PE1_E1_I2_Env_SAS(PE1_E1_I2_Env):
-    def _reset_vessels(self):
-        super()._reset_vessels()
 
 class PE_E1_I2_Agent(KSPDGBaseAgent):                                    
     def __init__(self):
@@ -293,7 +297,7 @@ if __name__ == "__main__":
     pe_e1_i2_agent = PE_E1_I2_Agent()    
     runner = AgentEnvRunner(
         agent=pe_e1_i2_agent, 
-        env_cls=PE1_E1_I2_Env_SAS, 
+        env_cls=PE1_Env_SAS, 
         env_kwargs=None,
         runner_timeout=None,
         debug=False,

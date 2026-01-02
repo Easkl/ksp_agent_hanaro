@@ -95,7 +95,16 @@ class KSPDGBaseEnv(ABC, gym.Env):
         self.logger.info("Connected to kRPC server")
 
         # Load save file from start of mission scenario
-        self.conn.space_center.load(self.loadfile)
+        try:
+            self.conn.space_center.load(self.loadfile)
+        except Exception as e:
+            msg = (
+                f"Failed to load KSP save '{self.loadfile}'. "
+                "This usually means the KSPDG mission/save files were not copied into your KSP installation. "
+                "Run the installer script 'kspdg/scripts/install_ksp_files.py' and point it at your KSP install folder "
+                "(the folder that contains 'GameData')."
+            )
+            raise RuntimeError(msg) from e
     
     def _start_bot_threads(self) -> None:
         """ Start parallel thread to continuously execute lady-guard policy
